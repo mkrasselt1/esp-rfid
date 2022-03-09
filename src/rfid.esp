@@ -1,21 +1,166 @@
-String uid = "";
-String type = "";
-String currentInput = "";
 String pinCode = "";
+String type = "";
+String uid = "";
+String currentInput = "";
 
-void ICACHE_FLASH_ATTR wiegandRead()
+bool pinCodeReadFinished = false;
+bool rfidReadFinished = false;
+
+void wiegandRead()
 {
-	// if we get 26 or 34 bit burst then we have a scanned PICC
-	if (wg.getWiegandType() == WIEGANDTYPE_PICC26 || wg.getWiegandType() == WIEGANDTYPE_PICC34)
+	if (wg.available())
+	{
+		// if we get 26 or 34 bit burst then we have a scanned PICC
+		if (wg.getWiegandType() == WIEGANDTYPE_PICC26 || wg.getWiegandType() == WIEGANDTYPE_PICC34)
+		{
+	#ifdef DEBUG
+			Serial.print(F("[ INFO ] PICC's UID: "));
+			Serial.println(wg.getCode());
+	#endif
+			uid = String(wg.getCode(), DEC);
+			type = String(wg.getWiegandType(), DEC);
+			cooldown = millis() + COOLDOWN_MILIS;
+			rfidReadFinished = true;
+		}
+	}
+}
+
+#ifndef OFFICIALBOARD
+void mfrc522Read()
+{
+	if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial())
+	{
+		return;
+	}
+	mfrc522.PICC_HaltA();
+	cooldown = millis() + COOLDOWN_MILIS;
+#ifdef DEBUG
+	Serial.print(F("[ INFO ] PICC's UID: "));
+#endif
+	for (int i = 0; i < mfrc522.uid.size; ++i)
+	{
+		uid += String(mfrc522.uid.uidByte[i], HEX);
+	}
+#ifdef DEBUG
+	Serial.print(uid);
+#endif
+	MFRC522::PICC_Type piccType = mfrc522.PICC_GetType(mfrc522.uid.sak);
+	type = mfrc522.PICC_GetTypeName(piccType);
+#ifdef DEBUG
+	Serial.print(" " + type);
+#endif
+	rfidReadFinished = true;
+}
+
+void pn532Read()
+{
+	bool found = false;
+	byte pnuid[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+	eCardType e_CardType;
+	byte u8_UidLength = 0x00; // UID = 4 or 7 bytes
+	found = pn532.ReadPassiveTargetID(pnuid, &u8_UidLength, &e_CardType);
+	if (found && u8_UidLength >= 4)
 	{
 #ifdef DEBUG
 		Serial.print(F("[ INFO ] PICC's UID: "));
-		Serial.println(wg.getCode());
 #endif
-		uid = String(wg.getCode(), DEC);
-		type = String(wg.getWiegandType(), DEC);
-		cooldown = millis() + 2000;
+		for (uint8_t i = 0; i < u8_UidLength; i++)
+		{
+			uid += String(pnuid[i], HEX);
+		}
+#ifdef DEBUG
+		Serial.print(uid);
+#endif
+		cooldown = millis() + COOLDOWN_MILIS;
+		rfidReadFinished = true;
 	}
+}
+
+void genericRead()
+{
+	while (Serial.available() > 0)
+	{
+		RFIDr.rfidSerial(Serial.read());
+	}
+	if (RFIDr.Available())
+	{
+		uid = RFIDr.GetHexID();
+		type = RFIDr.GetTagType();
+		cooldown = millis() + COOLDOWN_MILIS;
+		rfidReadFinished = true;
+#ifdef DEBUG
+		Serial.print(F("[ INFO ] PICC's UID: "));
+		Serial.print(uid);
+#endif
+	}
+
+	if (config.readertype == READER_MFRC522_RDM6300 && uid.length() == 0)
+	{
+		mfrc522Read();
+	}
+
+	else if (config.readertype == READER_WIEGAND_RDM6300 && uid.length() == 0)
+	{
+		wiegandRead();
+	}
+
+	else if (config.readertype == READER_PN532_RDM6300 && uid.length() == 0)
+	{
+		pn532Read();
+	}
+}
+#endif
+
+void rfidRead()
+{
+	if(pinCodeReadFinished)
+	{
+		return;
+	}
+#ifdef OFFICIALBOARD
+	wiegandRead();
+#endif
+#ifndef OFFICIALBOARD
+	if (config.readertype == READER_MFRC522)
+	{
+		mfrc522Read();
+	}
+	else if (config.readertype == READER_WIEGAND)
+	{
+		wiegandRead();
+	}
+	else if (config.readertype == READER_PN532)
+	{
+		pn532Read();
+	}
+	else if (config.readertype > READER_PN532)
+	{
+		genericRead();
+	}
+#endif
+}
+
+void pinCodeRead()
+{
+	// Keep an eye on timeout waiting for keypress
+	// Clear code and timer when timeout is reached
+	if (keyTimer > 0 && millis() - keyTimer >= KEYBOARD_TIMEOUT_MILIS)
+	{
+#ifdef DEBUG
+		Serial.println("[ INFO ] Keycode timeout");
+#endif
+		keyTimer = 0;
+		currentInput = "";
+		type = "";
+		uid = "";
+		pinCodeReadFinished = false;
+		return;
+	}
+	if (pinCodeReadFinished)
+	{
+		return;
+	}
+
 	// if we get a 4 bit burst then a key has been pressed
 	// add the key to the current input and reset the Waiting time
 	// for the next key unless * or # have been pressed
@@ -51,223 +196,18 @@ void ICACHE_FLASH_ATTR wiegandRead()
 		currentInput = "";
 		keyTimer = 0;
 		cooldown = millis() + COOLDOWN_MILIS;
+		pinCodeReadFinished = true;
 	}
 }
 
-void ICACHE_FLASH_ATTR rfidloop()
+void rfidProcess()
 {
-#ifdef OFFICIALBOARD
-	if (wg.available())
+	if (!rfidReadFinished || (config.pinCodeRequested && !pinCodeReadFinished))
 	{
-		wiegandRead();
-	}
-	else
-	{
-		delay(50);
 		return;
 	}
-#endif
-#ifndef OFFICIALBOARD
-	if (config.readertype == READER_MFRC522)
-	{
-		if (!mfrc522.PICC_IsNewCardPresent())
-		{
-			delay(50);
-			return;
-		}
-		if (!mfrc522.PICC_ReadCardSerial())
-		{
-			delay(50);
-			return;
-		}
-		mfrc522.PICC_HaltA();
-		cooldown = millis() + COOLDOWN_MILIS;
-#ifdef DEBUG
-		Serial.print(F("[ INFO ] PICC's UID: "));
-#endif
-		for (int i = 0; i < mfrc522.uid.size; ++i)
-		{
-			uid += String(mfrc522.uid.uidByte[i], HEX);
-		}
-#ifdef DEBUG
-		Serial.print(uid);
-#endif
-		MFRC522::PICC_Type piccType = mfrc522.PICC_GetType(mfrc522.uid.sak);
-		type = mfrc522.PICC_GetTypeName(piccType);
-#ifdef DEBUG
-		Serial.print(" " + type);
-#endif
-	}
-	else if (config.readertype == READER_WIEGAND)
-	{
-		if (wg.available())
-		{
-			wiegandRead();
-		}
-		else
-		{
-			delay(50);
-			return;
-		}
-		// Keep an eye on timeout waiting for keypress
-		// Clear code and timer when timeout is reached
-		if (keyTimer > 0 && millis() - keyTimer >= KEYBOARD_TIMEOUT_MILIS)
-		{
-#ifdef DEBUG
-			Serial.println("[ INFO ] Keycode timeout");
-#endif
-			keyTimer = 0;
-			currentInput = "";
-			return;
-		}
-		if (keyTimer > 0) // we are still waiting for keycode to build up
-		{
-#ifdef DEBUG
-			Serial.println("[ INFO ] still waiting for keypress!!");
-#endif
-			return;
-		}
-		// We need to wait for the pin code after a card is read
-		if (config.pinCodeRequested && pinCode == "") {
-			return;
-		}
-	}
-	else if (config.readertype == READER_PN532)
-	{
-		bool found = false;
-		byte pnuid[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-		eCardType e_CardType;
-		byte u8_UidLength = 0x00; // UID = 4 or 7 bytes
-		found = pn532.ReadPassiveTargetID(pnuid, &u8_UidLength, &e_CardType);
-		if (found && u8_UidLength >= 4)
-		{
-#ifdef DEBUG
-			Serial.print(F("[ INFO ] PICC's UID: "));
-#endif
-			for (uint8_t i = 0; i < u8_UidLength; i++)
-			{
-				uid += String(pnuid[i], HEX);
-			}
-#ifdef DEBUG
-			Serial.print(uid);
-#endif
-			cooldown = millis() + COOLDOWN_MILIS;
-		}
-		else
-		{
-			delay(50);
-			return;
-		}
-	}
-	else if (config.readertype > READER_PN532)
-	{
-		while (Serial.available() > 0)
-		{
-			RFIDr.rfidSerial(Serial.read());
-		}
-		if (RFIDr.Available())
-		{
-			uid = RFIDr.GetHexID();
-			type = RFIDr.GetTagType();
-			cooldown = millis() + COOLDOWN_MILIS;
-#ifdef DEBUG
-			Serial.print(F("[ INFO ] PICC's UID: "));
-			Serial.print(uid);
-#endif
-		}
-		else
-		{
-			if (config.readertype == READER_RDM6300)
-			{
-				delay(50);
-				return;
-			}
-		}
-
-		if (config.readertype == READER_MFRC522_RDM6300 && uid.length() == 0)
-		{
-			if (!mfrc522.PICC_IsNewCardPresent())
-			{
-				delay(50);
-				return;
-			}
-			if (!mfrc522.PICC_ReadCardSerial())
-			{
-				delay(50);
-				return;
-			}
-			mfrc522.PICC_HaltA();
-			cooldown = millis() + COOLDOWN_MILIS;
-#ifdef DEBUG
-			Serial.print(F("[ INFO ] PICC's UID: "));
-#endif
-			for (int i = 0; i < mfrc522.uid.size; ++i)
-			{
-				uid += String(mfrc522.uid.uidByte[i], HEX);
-			}
-#ifdef DEBUG
-			Serial.print(uid);
-#endif
-			MFRC522::PICC_Type piccType = mfrc522.PICC_GetType(mfrc522.uid.sak);
-			type = mfrc522.PICC_GetTypeName(piccType);
-#ifdef DEBUG
-			Serial.print(" " + type);
-#endif
-		}
-
-		else if (config.readertype == READER_WIEGAND_RDM6300 && uid.length() == 0)
-		{
-			if (wg.available())
-			{
-#ifdef DEBUG
-				Serial.print(F("[ INFO ] PICC's UID: "));
-				Serial.println(wg.getCode());
-#endif
-				uid = String(wg.getCode(), DEC);
-				type = String(wg.getWiegandType(), DEC);
-				cooldown = millis() + COOLDOWN_MILIS;
-			}
-			else
-			{
-				return;
-			}
-		}
-
-		else if (config.readertype == READER_PN532_RDM6300 && uid.length() == 0)
-		{
-			bool found = false;
-			byte pnuid[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-			eCardType e_CardType;
-			byte u8_UidLength = 0x00; // UID = 4 or 7 bytes
-			found = pn532.ReadPassiveTargetID(pnuid, &u8_UidLength, &e_CardType);
-			if (found && u8_UidLength >= 4)
-			{
-#ifdef DEBUG
-				Serial.print(F("[ INFO ] PICC's UID: "));
-#endif
-				for (uint8_t i = 0; i < u8_UidLength; i++)
-				{
-					uid += String(pnuid[i], HEX);
-				}
-#ifdef DEBUG
-				Serial.print(uid);
-#endif
-				cooldown = millis() + COOLDOWN_MILIS;
-			}
-			else
-			{
-				delay(50);
-				return;
-			}
-		}
-	}
-
-	else //no reader selected
-	{
-		delay(50);
-		return;
-	}
-#endif
+	rfidReadFinished = false;
+	pinCodeReadFinished = false;
 	String filename = "/P/";
 	filename += uid;
 	File f = SPIFFS.open(filename, "r");
@@ -280,10 +220,8 @@ void ICACHE_FLASH_ATTR rfidloop()
 		auto error = deserializeJson(json, buf.get());
 		if (!error)
 		{
-
 			for (int currentRelay = 0; currentRelay < config.numRelays; currentRelay++)
 			{
-
 				int AccType = ACCCESS_DENIED;
 
 				String username = json["user"];
@@ -303,7 +241,6 @@ void ICACHE_FLASH_ATTR rfidloop()
 						mqtt_publish_access(now(), "true", "Wrong pin code", username, uid);
 					}
 				}
-
 #ifdef DEBUG
 				Serial.println(" = known PICC");
 				Serial.print("[ INFO ] User Name: ");
@@ -329,7 +266,6 @@ void ICACHE_FLASH_ATTR rfidloop()
 							mqtt_publish_access(now(), "true", "Always", username, uid);
 						}
 					}
-
 					else
 					{
 #ifdef DEBUG
@@ -423,8 +359,17 @@ void ICACHE_FLASH_ATTR rfidloop()
 			digitalWrite(config.accessdeniedpin, HIGH);
 		}
 	}
-	pinCode = "";
-	uid = "";
+}
+
+void rfidLoop()
+{
+	rfidRead();
+	if (!rfidReadFinished)
+	{
+		delay(50);
+	}
+	pinCodeRead();
+	rfidProcess();
 }
 
 #ifndef OFFICIALBOARD
