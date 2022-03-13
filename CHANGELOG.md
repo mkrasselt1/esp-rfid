@@ -149,7 +149,7 @@ All notable changes to this project will be documented in this file.
 
 ## [0.6.1] - 2018-03-14
 #### Added
-- [firmware] ICACHE_FLASH_ATTR and ICACHE_RAM_ATTR decorators (did not feel any difference in terms of speed, keeping it anyway).
+- [firmware] function and ICACHE_RAM_ATTR decorators (did not feel any difference in terms of speed, keeping it anyway).
 - [dev tools] Web UI Demo https://bitadvise.com/esp-rfid/
 - [dev tools] Websocket emulator access log
 
